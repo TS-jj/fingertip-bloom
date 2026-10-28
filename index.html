@@ -6,6 +6,9 @@
 <meta name="theme-color" content="#08050a">
 <title>指尖花 · Fingertip Bloom</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3CradialGradient id='g' cx='50%25' cy='50%25'%3E%3Cstop offset='0' stop-color='%23ffe6f0'/%3E%3Cstop offset='1' stop-color='%23e0559b'/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width='32' height='32' fill='%231a0a14'/%3E%3Cg fill='url(%23g)'%3E%3Cellipse cx='16' cy='9' rx='3.4' ry='7'/%3E%3Cellipse cx='16' cy='23' rx='3.4' ry='7'/%3E%3Cellipse cx='9' cy='16' rx='7' ry='3.4'/%3E%3Cellipse cx='23' cy='16' rx='7' ry='3.4'/%3E%3Cellipse cx='11' cy='11' rx='3' ry='6' transform='rotate(-45 11 11)'/%3E%3Cellipse cx='21' cy='21' rx='3' ry='6' transform='rotate(-45 21 21)'/%3E%3Cellipse cx='21' cy='11' rx='3' ry='6' transform='rotate(45 21 11)'/%3E%3Cellipse cx='11' cy='21' rx='3' ry='6' transform='rotate(45 11 21)'/%3E%3C/g%3E%3Ccircle cx='16' cy='16' r='3.2' fill='%23ffd9a0'/%3E%3C/svg%3E">
+<!-- 让浏览器解析页面时就开始拉模型；不用等 90KB 脚本解析与粒子初始化结束才发请求 -->
+<link rel="modulepreload" href="./vendor/vision_bundle.mjs">
+<link rel="preload" href="./vendor/hand_landmarker.task" as="fetch" type="application/octet-stream" crossorigin="anonymous">
 <style>
   *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{width:100%;height:100%;overflow:hidden;background:#070409}
@@ -1724,7 +1727,25 @@ const vretry = document.getElementById('vretry');
 const vskip = document.getElementById('vskip');
 let landmarker = null;
 let modelPromise = null;
-let skipModel = false;      // 用户点了「跳过」
+let skipModel = false;      // 用户主动放弃手势加载
+let introReleased = false;  // 已经先进到花朵，不允许后台加载再把引导页拉回来
+
+// 体验优先：模型 / 摄像头永远在后台准备，绝不能挡住花朵本身。
+// 这和「模型失败后的降级」不同：这里仍会继续加载，成功后自动切回手势模式。
+function enterInstantExperience() {
+  if (introReleased || state.ready) return;
+  introReleased = true;
+  veil.classList.add('gone');
+  ui.classList.add('on');
+  state.mouseMode = true;
+  state.camFailed = false;
+  state.ready = true;
+  hud.classList.add('on');
+  campanel.classList.remove('on');
+  btnMouse.style.display = 'none';
+  setHintMode(true);
+  tryPlayMusic();
+}
 
 function enterMouseFallback(msg, opts) {
   opts = opts || {};
@@ -1834,6 +1855,9 @@ async function startCamera() {
   const ok = await loadModel();
   if (skipModel) return;      // 等模型期间用户已经点了「跳过」
   if (!ok) {
+    // 页面已经先进到花朵了：后台模型失败只保留手指/鼠标模式，
+    // 绝不能再把用户拉回遮罩页。
+    if (introReleased || state.ready) return;
     enterMouseFallback(
       '手部识别模型没能加载。\n' +
       '可以先用鼠标／手指滑动控制花朵。',
@@ -1848,6 +1872,7 @@ async function startCamera() {
 
   // 非安全上下文（http + 局域网 IP）下浏览器根本不提供摄像头 API
   if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    if (introReleased || state.ready) return;
     enterMouseFallback(
       '浏览器只在 HTTPS 或 localhost 下提供摄像头。\n\n' +
       (IS_TOUCH
@@ -1866,6 +1891,8 @@ async function startCamera() {
     });
   } catch (err) {
     console.warn('摄像头失败', err);
+    // 用户已经在玩花了，权限被拒也只是不切换手势模式，不能重新盖住整页。
+    if (introReleased || state.ready) return;
     const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
     enterMouseFallback(
       denied
@@ -1970,47 +1997,16 @@ async function boot() {
     return;
   }
 
-  // 模型总共 17MB（wasm 9.4MB + 模型 7.8MB），4G 下可能要几十秒。
-  // 原来这里是一句静态的「载入手部识别模型…」，网速慢时看起来跟卡死没区别 ——
-  // 现在改成秒数计时，8 秒后给「跳过」，让用户随时有出路。
-  const t0 = Date.now();
-  vmsg.textContent = '首次打开需下载约 9MB 手部识别模型\n之后会缓存在手机里，秒开';
+  // 体验优先：这里必须**同步**放用户进花朵，绝不能先碰 MediaPipe。
+  // createFromOptions 在部分 iPhone 上会短暂占住主线程；即便用 setTimeout，
+  // 只要先调用了它，定时器也没有机会执行，页面看起来还是「进不去」。
+  enterInstantExperience();
 
-  // 下载要好几秒，先试着放音乐 —— 等待期间有声音，就不会有人以为页面卡死了。
-  // 被浏览器拦下的话，下面那个提示条会告诉用户点一下屏幕。
-  tryPlayMusic();
-  const ticker = setInterval(() => {
-    if (skipModel) return;
-    const s = Math.round((Date.now() - t0) / 1000);
-    if (s >= 20) {
-      vmsg.textContent = '正在下载手部识别模型（约 9MB）\n已等待 ' + s + ' 秒，网络较慢…';
-      vskip.style.display = 'inline-flex';
-    } else if (s >= 8) {
-      vmsg.textContent = '下载手部识别模型… ' + s + 's\n首次约 9MB，之后秒开';
-      vskip.style.display = 'inline-flex';
-    } else if (s >= 2) {
-      vmsg.textContent = '下载手部识别模型… ' + s + 's';
-    }
-  }, 1000);
-
-  vskip.onclick = () => {
-    skipModel = true;
-    clearInterval(ticker);
-    // 直接进效果，不再多弹一层确认 —— 用户已经等急了
-    veil.classList.add('gone');
-    ui.classList.add('on');
-    state.mouseMode = true;
-    state.camFailed = true;
-    state.ready = true;
-    hud.classList.add('on');
-    campanel.classList.remove('on');
-    btnMouse.style.display = 'none';
-    setHintMode(true);
-    tryPlayMusic();
-  };
-
-  await startCamera();
-  clearInterval(ticker);
+  // 模型晚一点再开始准备：让浏览器至少先把花朵与 UI 画出一帧。
+  // 成功后自动请求摄像头、切回手势；失败时继续保持已可玩的手指滑动模式。
+  setTimeout(() => {
+    startCamera().catch((err) => console.warn('手势后台启动失败', err));
+  }, 1200);
 }
 
 // 开合度：指尖到腕点距离均值 / 掌长（实测：完全张开≈1.62，握拳≈0.95）
