@@ -105,6 +105,27 @@
     50%{border-color:rgba(255,140,175,.62);color:#ffd9e6;box-shadow:0 0 14px rgba(255,120,160,.38)}
   }
 
+  /* 自动播放被浏览器拦下时的提示条
+     —— 只让按钮闪几下，绝大多数人根本不会注意到（尤其是 iOS） */
+  .mtip{position:fixed;left:50%;bottom:104px;z-index:45;
+    transform:translateX(-50%) translateY(16px);
+    display:none;align-items:center;gap:9px;padding:10px 19px 10px 15px;border-radius:999px;
+    background:rgba(40,14,26,.88);border:1px solid rgba(255,140,175,.42);
+    box-shadow:0 10px 34px rgba(0,0,0,.55),0 0 22px rgba(255,110,155,.18);
+    -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+    font-size:11.5px;letter-spacing:.1em;color:#ffe2ec;white-space:nowrap;
+    opacity:0;transition:opacity .45s ease,transform .45s cubic-bezier(.16,1,.3,1)}
+  .mtip.on{display:flex;opacity:1;transform:translateX(-50%) translateY(0)}
+  .mtip svg{width:14px;height:14px;flex:none;stroke:#ff9dbb;fill:none;stroke-width:1.5}
+  .mtip b{color:#fff;font-weight:600}
+  .mtip::after{content:'';position:absolute;inset:-1px;border-radius:999px;pointer-events:none;
+    animation:mtipPulse 2.4s ease-out infinite}
+  @keyframes mtipPulse{
+    0%{box-shadow:0 0 0 0 rgba(255,120,160,.42)}
+    70%{box-shadow:0 0 0 15px rgba(255,120,160,0)}
+    100%{box-shadow:0 0 0 0 rgba(255,120,160,0)}
+  }
+
   /* 换色按钮：前面的小色点就是当前花色 */
   #btnHue .swatch{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;
     background:#ff7fa4;box-shadow:0 0 7px rgba(255,127,164,.75);
@@ -201,8 +222,12 @@
     .hud{left:16px;top:auto;bottom:118px;transform:none;padding:8px 14px 8px 9px;gap:9px}
     .hud.on{transform:none}
     .hud .ico{width:24px;height:24px}.hud .m{font-size:11px}.hud .c{font-size:8.5px}
-    .cam{right:14px;top:58px;bottom:auto;width:118px;height:80px;border-radius:9px}
-    .cam .lb{font-size:6.5px;top:5px;left:7px}
+    /* 摄像头预览：手机上原来只有 118×80，人脸小得看不清。
+       放大到 4:3 的 164×123 —— 顺便修掉拉伸变形（原来是 1.48:1，视频是 4:3） */
+    .cam{right:12px;top:54px;bottom:auto;width:164px;height:123px;border-radius:11px}
+    .cam .lb{font-size:7px;top:6px;left:8px;gap:4px}
+    /* 提示条要躲开左下角「等待手势」那个 hud（它在 bottom:118px），否则会压在一起 */
+    .mtip{bottom:176px;font-size:11px;letter-spacing:.06em;padding:9px 16px 9px 13px}
     .hint{gap:16px;bottom:70px}
     .hint .it .k{font-size:9.5px}.hint .it .d{display:none}
     .hint .it svg{width:13px;height:13px}
@@ -217,7 +242,8 @@
   }
   /* 横屏手机：高度只有 390 左右，底部放不下两行，hint 必须上移 */
   @media (max-height:560px) and (orientation:landscape){
-    .cam{width:130px;height:88px;top:auto;bottom:70px}
+    .cam{width:168px;height:126px;top:auto;bottom:70px}
+    .mtip{bottom:100px}
     .hint{bottom:58px;gap:22px}
     .hint .it .d{display:none}
     .hint .it .k{font-size:9.5px}
@@ -238,6 +264,8 @@
     .hint .it svg{width:11px;height:11px}
     .brand .s{display:none}   /* 320 这种宽度放不下副标题 */
     .brand .t{font-size:14px}
+    /* 窄屏上 164 宽会占到一半屏幕，收一档 */
+    .cam{width:148px;height:111px;top:52px}
     .veil{padding:22px}
     .veil h1{font-size:15px;letter-spacing:.14em}
     .veil p{font-size:11.5px;line-height:1.85}
@@ -329,6 +357,14 @@
   </div>
 </div>
 
+<!-- 自动播放被浏览器拦下时冒出来的提示条 -->
+<div class="mtip" id="mtip">
+  <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 17.5V6.2l10-2v10.6"/><circle cx="6.4" cy="17.6" r="2.6"/><circle cx="16.4" cy="14.9" r="2.6"/>
+  </svg>
+  <span>点一下屏幕，开启<b>音乐</b></span>
+</div>
+
 <!-- ?v= 是缓存版本号：换了音乐文件就把数字加一，否则浏览器/CDN 会继续放旧的 -->
 <audio id="bgm" src="./bloom.mp3?v=2" loop preload="auto"></audio>
 
@@ -359,6 +395,7 @@
     <div class="acts">
       <div class="go" id="vgo" style="display:none">进入鼠标模式</div>
       <div class="go alt" id="vretry" style="display:none">重新尝试摄像头</div>
+      <div class="go alt" id="vskip" style="display:none">跳过，先看效果</div>
     </div>
     <div class="lanhint" id="lanhint"></div>
   </div>
@@ -1325,6 +1362,14 @@ const bgm = document.getElementById('bgm');
 const btnMusic = document.getElementById('btnMusic');
 const meq = document.getElementById('meq');
 const mtext = document.getElementById('mtext');
+const mtip = document.getElementById('mtip');
+
+// 提示条：自动播放被拦时露出来，播上了就收回去
+function showMusicTip(on) {
+  mtip.classList.toggle('on', !!on);
+  if (on) btnMusic.classList.add('needtap');
+  else btnMusic.classList.remove('needtap');
+}
 
 const MUSIC_VOL = 0.52;
 let musicWanted = true;      // 用户是否希望有音乐（点暂停后为 false）
@@ -1430,16 +1475,16 @@ function tryPlayMusic() {
 
   const onPlayed = () => {
     musicStarted = true;
-    btnMusic.classList.remove('needtap');
+    showMusicTip(false);
     fadeTo(MUSIC_VOL, 2200);
     syncMusicBtn();
   };
 
   const onBlocked = () => {
     syncMusicBtn();
-    // 浏览器拦了自动播放：闪一下音乐按钮，提示点它
-    btnMusic.classList.add('needtap');
-    setTimeout(() => btnMusic.classList.remove('needtap'), 9000);
+    // 浏览器拦了自动播放。原来只让按钮闪 9 秒就没了，用户根本注意不到 ——
+    // 现在改成底部冒一条常驻提示，直到真的播起来
+    showMusicTip(true);
   };
 
   if (p && p.then) p.then(onPlayed).catch(onBlocked);
@@ -1455,6 +1500,7 @@ btnMusic.addEventListener('click', () => {
     tryPlayMusic();
   } else {
     musicWanted = false;
+    showMusicTip(false);          // 用户主动暂停，不该再催他点
     fadeTo(0, 380);
     setTimeout(() => { if (!musicWanted) bgm.pause(); }, 400);
     setTimeout(syncMusicBtn, 60);
@@ -1478,6 +1524,11 @@ document.addEventListener('visibilitychange', () => {
 });
 
 bgm.addEventListener('play', syncMusicBtn);
+// 真的出声了才收提示条（play 事件在 iOS 上可能早于真正开始解码）
+bgm.addEventListener('playing', () => {
+  showMusicTip(false);
+  syncMusicBtn();
+});
 bgm.addEventListener('pause', syncMusicBtn);
 bgm.addEventListener('error', () => {
   mtext.textContent = '无音乐';
@@ -1670,8 +1721,10 @@ const vspin = document.getElementById('vspin');
 })();
 
 const vretry = document.getElementById('vretry');
+const vskip = document.getElementById('vskip');
 let landmarker = null;
 let modelPromise = null;
+let skipModel = false;      // 用户点了「跳过」
 
 function enterMouseFallback(msg, opts) {
   opts = opts || {};
@@ -1688,6 +1741,7 @@ function enterMouseFallback(msg, opts) {
   vtitle.textContent = opts.title || '鼠标模式';
   vmsg.textContent = msg;
   vspin.style.display = 'none';
+  vskip.style.display = 'none';       // 已经进降级流程了，跳过按钮没意义
   vgo.style.display = 'inline-flex';
   vgo.textContent = opts.btn || '先看看效果';
   vgo.onclick = () => {
@@ -1712,13 +1766,28 @@ function enterMouseFallback(msg, opts) {
 }
 
 // 载入手部识别模型（只做一次，失败可重试）
+//
+// ⚠️ 这里每个 await 都必须带超时。MediaPipe 的 GPU delegate 在 iOS Safari 上
+// 有概率「永久挂起」——既不 resolve 也不 reject。await 一个永远不返回的 Promise
+// 会让页面永远停在「载入手部识别模型…」，这正是苹果手机上卡死的原因。
+function withTimeout(p, ms, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error((label || '') + ' 超时 ' + ms + 'ms')), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
 function loadModel() {
   if (landmarker) return Promise.resolve(true);
   if (modelPromise) return modelPromise;
   modelPromise = (async () => {
     let HandLandmarker, FilesetResolver;
     try {
-      const mod = await import('./vendor/vision_bundle.mjs');
+      // 137KB 的 ESM 包，正常 1 秒内
+      const mod = await withTimeout(import('./vendor/vision_bundle.mjs'), 20000, '模块');
       HandLandmarker = mod.HandLandmarker;
       FilesetResolver = mod.FilesetResolver;
     } catch (err) {
@@ -1737,26 +1806,33 @@ function loadModel() {
         minTrackingConfidence: 0.5
       });
     };
-    try {
-      landmarker = await build('GPU');
-    } catch (err) {
-      console.warn('GPU 初始化失败，回退 CPU', err);
+
+    // iOS Safari 的 WebGL delegate 不可靠（会挂起），而 CPU 在手机上跑 640×480
+    // 完全够用 —— 苹果设备直接走 CPU，跳过 GPU 那一轮
+    const plan = IS_IOS
+      ? [['CPU', 34000]]
+      : [['GPU', 13000], ['CPU', 34000]];
+
+    for (let i = 0; i < plan.length; i++) {
+      const delegate = plan[i][0], ms = plan[i][1];
       try {
-        landmarker = await build('CPU');
-      } catch (e2) {
-        console.warn('CPU 初始化失败', e2);
-        modelPromise = null;
-        return false;
+        landmarker = await withTimeout(build(delegate), ms, delegate);
+        window.__handReady = true;
+        window.__delegate = delegate;
+        return true;
+      } catch (err) {
+        console.warn(delegate + ' 初始化失败', err);
       }
     }
-    window.__handReady = true;
-    return true;
+    modelPromise = null;
+    return false;
   })();
   return modelPromise;
 }
 
 async function startCamera() {
   const ok = await loadModel();
+  if (skipModel) return;      // 等模型期间用户已经点了「跳过」
   if (!ok) {
     enterMouseFallback(
       '手部识别模型没能加载。\n' +
@@ -1805,6 +1881,10 @@ async function startCamera() {
 
   video.srcObject = stream;
   await video.play().catch(() => {});
+  if (skipModel) {                       // 请求摄像头期间用户点了「跳过」
+    stream.getTracks().forEach((t) => t.stop());
+    return;
+  }
 
   veil.classList.add('gone');
   campanel.classList.add('on');
@@ -1874,7 +1954,6 @@ function startDetect() {
 
 async function boot() {
   ui.classList.add('on');
-  vmsg.textContent = '载入手部识别模型…';
 
   // file:// 下浏览器禁用摄像头，且无法加载 ESM 模块
   if (location.protocol === 'file:') {
@@ -1891,7 +1970,47 @@ async function boot() {
     return;
   }
 
+  // 模型总共 17MB（wasm 9.4MB + 模型 7.8MB），4G 下可能要几十秒。
+  // 原来这里是一句静态的「载入手部识别模型…」，网速慢时看起来跟卡死没区别 ——
+  // 现在改成秒数计时，8 秒后给「跳过」，让用户随时有出路。
+  const t0 = Date.now();
+  vmsg.textContent = '首次打开需下载约 9MB 手部识别模型\n之后会缓存在手机里，秒开';
+
+  // 下载要好几秒，先试着放音乐 —— 等待期间有声音，就不会有人以为页面卡死了。
+  // 被浏览器拦下的话，下面那个提示条会告诉用户点一下屏幕。
+  tryPlayMusic();
+  const ticker = setInterval(() => {
+    if (skipModel) return;
+    const s = Math.round((Date.now() - t0) / 1000);
+    if (s >= 20) {
+      vmsg.textContent = '正在下载手部识别模型（约 9MB）\n已等待 ' + s + ' 秒，网络较慢…';
+      vskip.style.display = 'inline-flex';
+    } else if (s >= 8) {
+      vmsg.textContent = '下载手部识别模型… ' + s + 's\n首次约 9MB，之后秒开';
+      vskip.style.display = 'inline-flex';
+    } else if (s >= 2) {
+      vmsg.textContent = '下载手部识别模型… ' + s + 's';
+    }
+  }, 1000);
+
+  vskip.onclick = () => {
+    skipModel = true;
+    clearInterval(ticker);
+    // 直接进效果，不再多弹一层确认 —— 用户已经等急了
+    veil.classList.add('gone');
+    ui.classList.add('on');
+    state.mouseMode = true;
+    state.camFailed = true;
+    state.ready = true;
+    hud.classList.add('on');
+    campanel.classList.remove('on');
+    btnMouse.style.display = 'none';
+    setHintMode(true);
+    tryPlayMusic();
+  };
+
   await startCamera();
+  clearInterval(ticker);
 }
 
 // 开合度：指尖到腕点距离均值 / 掌长（实测：完全张开≈1.62，握拳≈0.95）
