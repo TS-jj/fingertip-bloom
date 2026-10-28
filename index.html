@@ -69,6 +69,11 @@
     color:rgba(255,235,242,.82);text-shadow:0 1px 4px rgba(0,0,0,.8)}
   .cam .lb i{width:4px;height:4px;border-radius:50%;background:#ff5f8a;display:block;
     box-shadow:0 0 7px 1px rgba(255,80,125,.9);animation:blink 1.9s infinite}
+  /* 摄像头拿不到画面时的兜底提示（可点重试） */
+  .cam .cnotice{position:absolute;inset:0;display:none;place-items:center;padding:10px;
+    text-align:center;font-size:10.5px;line-height:1.7;letter-spacing:.04em;
+    color:#ffd9e6;background:rgba(12,5,10,.72);cursor:pointer;pointer-events:auto}
+  .cam .cnotice.on{display:grid}
   @keyframes blink{0%,100%{opacity:1}50%{opacity:.28}}
 
   /* 底部提示 */
@@ -313,6 +318,7 @@
   <div class="cam" id="campanel">
     <canvas id="camcv" width="484" height="324"></canvas>
     <div class="lb"><i></i>HAND TRACKING</div>
+    <div class="cnotice" id="camnotice"></div>
   </div>
 
   <div class="hint" id="hint">
@@ -404,7 +410,11 @@
   </div>
 </div>
 
-<video id="cam" playsinline muted autoplay style="display:none"></video>
+<!-- 不能用 display:none 藏：Chrome 对不可见 <video> 有时不产帧，
+     摄像头面板就会出现全黑（本地假摄像头测不出来，真实设备才复现）。
+     用 2px + 透明度 0 隐藏，元素仍在渲染树里，保证持续出帧。 -->
+<video id="cam" playsinline muted autoplay
+  style="position:fixed;left:-4px;top:-4px;width:2px;height:2px;opacity:.001;pointer-events:none"></video>
 
 <script>
 "use strict";
@@ -1889,11 +1899,13 @@ function requestCameraAccess() {
     return Promise.reject(new Error('此环境不支持摄像头'));
   }
   cameraRequest = navigator.mediaDevices.getUserMedia({
+    // ⚠️ 这里全部用 ideal，不加任何 max 硬约束。
+    // 上一版写了 frameRate:{max:24}，很多内置 / USB 摄像头只有 30fps 一档，
+    // 满足不了硬上限时 Chrome 会返回一个「不出帧」的流 —— 面板就是全黑。
     video: {
       facingMode: 'user',
-      // 移动端 640×480 对手势已经过剩，会和音乐 / 粒子抢资源；480×360 足够识别 21 点。
-      width: { ideal: 480 }, height: { ideal: 360 },
-      frameRate: { ideal: 24, max: 24 }
+      width: { ideal: 640 },
+      height: { ideal: 480 }
     },
     audio: false
   }).then((stream) => {
@@ -1968,7 +1980,70 @@ async function startCamera(fromUserTap) {
   btnMouse.style.display = '';   // 手势模式恢复了，允许切回去
   tryPlayMusic();
   startDetect();
+  startCamWatchdog();
 }
+
+// 摄像头看门狗：拿到流 ≠ 有画面。
+// 真实设备上常见「track 是 live，但 currentTime 不推进」的黑屏，
+// 而本地假摄像头永远测不出来。这里做两级自愈：
+//   第 1 级：重新 play()
+//   第 2 级：丢掉这个流，用最宽松的约束重新要一个
+let camWatchdog = null;
+function startCamWatchdog() {
+  clearInterval(camWatchdog);
+  let ticks = 0, lastCt = -1;
+  camWatchdog = setInterval(async () => {
+    if (!cameraStream) { clearInterval(camWatchdog); camWatchdog = null; return; }
+    // currentTime 在走 → 说明真的在出帧，收工
+    if (video.currentTime > 0.05 && video.currentTime !== lastCt) {
+      clearInterval(camWatchdog); camWatchdog = null; return;
+    }
+    lastCt = video.currentTime;
+    ticks++;
+    if (ticks === 2) {
+      console.warn('摄像头未出帧，重新 play()');
+      try { await video.play(); } catch (e) {}
+    } else if (ticks === 4) {
+      console.warn('摄像头仍未出帧，用最宽松约束重新请求');
+      await restartCameraStream();
+    } else if (ticks >= 8) {
+      clearInterval(camWatchdog); camWatchdog = null;
+      setCamNotice('摄像头画面没响应 · 点这里重试');
+    }
+  }, 1200);
+}
+
+async function restartCameraStream() {
+  try {
+    cameraRequest = null;
+    // 不给任何约束，让浏览器自己挑它能出的那一档
+    const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    const old = cameraStream;
+    cameraStream = s;
+    video.srcObject = s;
+    await video.play().catch(() => {});
+    // 新流接上之后再停旧的，避免中间闪一下黑
+    if (old) old.getTracks().forEach((t) => t.stop());
+  } catch (e) {
+    console.warn('重试摄像头失败', e);
+  }
+}
+
+// 摄像头面板里的提示（画面出不来时给个能点的出路）
+function setCamNotice(text) {
+  const el = document.getElementById('camnotice');
+  if (!el) return;
+  if (!text) { el.classList.remove('on'); return; }
+  el.textContent = text;
+  el.classList.add('on');
+}
+
+document.getElementById('camnotice').addEventListener('click', async () => {
+  setCamNotice('正在重试…');
+  await restartCameraStream();
+  setCamNotice('');
+  startCamWatchdog();
+});
 
 let detectStarted = false;
 function startDetect() {
