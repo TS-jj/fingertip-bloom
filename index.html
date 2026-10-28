@@ -1235,6 +1235,18 @@ const IS_TOUCH = (window.matchMedia && matchMedia('(pointer:coarse)').matches)
 // iOS / iPadOS（iPadOS 13+ 的 UA 伪装成 Mac，靠触点数区分）
 const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// 手机性能预算：音乐连续性比满粒子更重要。
+// 原先 116k 粒子 × DPR2 的后处理会和 CPU 手势识别抢主线程 / GPU，
+// 音乐解码就会出现「一卡一卡」。先把移动端固定在 1x + 70% 粒子，
+// 截图时仍会临时拉满，所以保存的图不会变糊。
+const MOBILE_DPRCAP = 1;
+const MOBILE_DRAW_RATIO = 0.70;
+if (IS_TOUCH) {
+  DPRCAP = MOBILE_DPRCAP;
+  drawCount = Math.floor(COUNT * MOBILE_DRAW_RATIO);
+  resize();
+}
 const ui = document.getElementById('ui');
 
 const GESTURE_NAME = ['指尖收拢', '半开 · 舒展', '手掌张开'];
@@ -1340,12 +1352,23 @@ function setHintMode(isMouse) {
 }
 
 btnMouse.addEventListener('click', () => {
+  // 手机端不再偷偷在后台请求摄像头：iOS / 微信常会把这种非用户手势请求拦掉。
+  // 用户点「开启摄像头」的这一刻同步发起权限请求，成功率最高。
+  if (IS_TOUCH && state.mouseMode && !cameraStream) {
+    btnMouse.classList.add('on');
+    btnMouse.lastChild.textContent = '正在开启…';
+    startCamera(true).catch(() => {
+      btnMouse.lastChild.textContent = '重试摄像头';
+    });
+    return;
+  }
+
   if (state.mouseMode) {
     // 尝试回到手势模式
     if (window.__handReady && !state.camFailed) {
       state.mouseMode = false;
       btnMouse.classList.remove('on');
-      btnMouse.lastChild.textContent = '鼠标模式';
+      btnMouse.lastChild.textContent = IS_TOUCH ? '手指模式' : '鼠标模式';
       campanel.classList.add('on');
       hud.classList.add('on');
       setHintMode(false);
@@ -1353,7 +1376,7 @@ btnMouse.addEventListener('click', () => {
   } else {
     state.mouseMode = true;
     btnMouse.classList.add('on');
-    btnMouse.lastChild.textContent = '手势模式';
+    btnMouse.lastChild.textContent = IS_TOUCH ? '开启摄像头' : '手势模式';
     campanel.classList.remove('on');
     hud.classList.add('on');
     setHintMode(true);
@@ -1683,7 +1706,7 @@ function restoreQuality() {
   shotBoostDpr = false; shotBoostDraw = 0;
   setTimeout(() => {
     if (backDraw) drawCount = backDraw;
-    if (backDpr && DPRCAP > 1) { DPRCAP = 1; resize(); }
+    if (backDpr && DPRCAP > MOBILE_DPRCAP) { DPRCAP = MOBILE_DPRCAP; resize(); }
     qualityLock = false;
   }, 320);
 }
@@ -1742,7 +1765,11 @@ function enterInstantExperience() {
   state.ready = true;
   hud.classList.add('on');
   campanel.classList.remove('on');
-  btnMouse.style.display = 'none';
+  // 触屏上保留一个明确的「开启摄像头」按钮：
+  // 摄像头请求由用户点击触发，iOS / 微信不会当作后台弹窗拦掉。
+  btnMouse.style.display = '';
+  btnMouse.classList.add('on');
+  btnMouse.lastChild.textContent = IS_TOUCH ? '开启摄像头' : '鼠标模式';
   setHintMode(true);
   tryPlayMusic();
 }
@@ -1851,7 +1878,39 @@ function loadModel() {
   return modelPromise;
 }
 
-async function startCamera() {
+// 摄像头权限要在「点按钮」那个用户手势里立刻请求；
+// 如果等模型下载完再请求，iOS / 微信经常会把它当后台弹窗直接拒掉。
+let cameraStream = null;
+let cameraRequest = null;
+function requestCameraAccess() {
+  if (cameraStream && cameraStream.active) return Promise.resolve(cameraStream);
+  if (cameraRequest) return cameraRequest;
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return Promise.reject(new Error('此环境不支持摄像头'));
+  }
+  cameraRequest = navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'user',
+      // 移动端 640×480 对手势已经过剩，会和音乐 / 粒子抢资源；480×360 足够识别 21 点。
+      width: { ideal: 480 }, height: { ideal: 360 },
+      frameRate: { ideal: 24, max: 24 }
+    },
+    audio: false
+  }).then((stream) => {
+    cameraStream = stream;
+    cameraRequest = null;
+    return stream;
+  }, (err) => {
+    cameraRequest = null;
+    throw err;
+  });
+  return cameraRequest;
+}
+
+async function startCamera(fromUserTap) {
+  // 先抢到权限，模型在后面慢慢初始化。只有 fromUserTap 才会在这里调用，
+  // 因而 getUserMedia 确实属于用户手势，不会丢权限弹窗。
+  const earlyStream = fromUserTap ? requestCameraAccess() : null;
   const ok = await loadModel();
   if (skipModel) return;      // 等模型期间用户已经点了「跳过」
   if (!ok) {
@@ -1866,33 +1925,18 @@ async function startCamera() {
     return;
   }
 
-  vmsg.textContent = '请求摄像头权限…';
-  vspin.style.display = 'block';
-  vgo.style.display = 'none';
-
-  // 非安全上下文（http + 局域网 IP）下浏览器根本不提供摄像头 API
-  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    if (introReleased || state.ready) return;
-    enterMouseFallback(
-      '浏览器只在 HTTPS 或 localhost 下提供摄像头。\n\n' +
-      (IS_TOUCH
-        ? '手机上用手指上下滑动，也能控制花朵开合。'
-        : '电脑本机用 start.bat 打开就有摄像头；\n当前地址不是 localhost，先用鼠标上下移动控制花朵。'),
-      { title: '此环境不支持摄像头', btn: IS_TOUCH ? '用手指滑动看效果' : '用鼠标看效果' }
-    );
-    return;
-  }
-
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-      audio: false
-    });
+    // fromUserTap 时用的是按钮刚点下去就开始的 Promise；其他情况才在这里申请。
+    stream = await (earlyStream || requestCameraAccess());
   } catch (err) {
     console.warn('摄像头失败', err);
     // 用户已经在玩花了，权限被拒也只是不切换手势模式，不能重新盖住整页。
-    if (introReleased || state.ready) return;
+    if (introReleased || state.ready) {
+      btnMouse.classList.add('on');
+      btnMouse.lastChild.textContent = IS_TOUCH ? '重试摄像头' : '鼠标模式';
+      return;
+    }
     const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
     enterMouseFallback(
       denied
@@ -1920,7 +1964,7 @@ async function startCamera() {
   state.camFailed = false;
   state.ready = true;
   btnMouse.classList.remove('on');
-  btnMouse.lastChild.textContent = '鼠标模式';
+  btnMouse.lastChild.textContent = IS_TOUCH ? '手指模式' : '鼠标模式';
   btnMouse.style.display = '';   // 手势模式恢复了，允许切回去
   tryPlayMusic();
   startDetect();
@@ -1940,7 +1984,9 @@ function startDetect() {
     if (!state.ready) return;
     if (state.mouseMode) return;
     if (video.readyState < 2) return;
-    if (now - lastDetect < 28) return;   // 约 35fps
+    // 手势识别不需要逐帧跑。手机 12fps 已足够连贯，还能留出 CPU 给音频解码，
+    // 避免背景音乐「一卡一卡」。桌面保持约 35fps。
+    if (now - lastDetect < (IS_TOUCH ? 82 : 28)) return;
     lastDetect = now;
 
     if (video.currentTime === lastVideoTime) { dbg.skipped++; return; }
@@ -2002,10 +2048,15 @@ async function boot() {
   // 只要先调用了它，定时器也没有机会执行，页面看起来还是「进不去」。
   enterInstantExperience();
 
-  // 模型晚一点再开始准备：让浏览器至少先把花朵与 UI 画出一帧。
-  // 成功后自动请求摄像头、切回手势；失败时继续保持已可玩的手指滑动模式。
+  // 模型晚一点后台预热：让浏览器至少先把花朵与 UI 画出一帧。
+  // 手机只预热模型，不主动请求摄像头——要由「开启摄像头」按钮的用户点击触发；
+  // 这样 iOS / 微信才能稳定弹出权限框。桌面仍保持自动打开摄像头。
   setTimeout(() => {
-    startCamera().catch((err) => console.warn('手势后台启动失败', err));
+    if (IS_TOUCH) {
+      loadModel().catch((err) => console.warn('手势后台预热失败', err));
+    } else {
+      startCamera().catch((err) => console.warn('手势后台启动失败', err));
+    }
   }, 1200);
 }
 
