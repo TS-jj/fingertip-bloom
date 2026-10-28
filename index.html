@@ -1906,16 +1906,17 @@ function handOpenness(lm) {
   return clamp((avg - 1.02) / (1.58 - 1.02), 0, 1);
 }
 
-// 画摄像头预览（灰度 + 粉色骨骼）
+// 画摄像头预览（轻微降饱和 + 粉色骨骼）
 function drawCam(res) {
   const w = camcv.width, h = camcv.height;
   camctx.save();
   camctx.clearRect(0, 0, w, h);
 
-  // 镜像 + 灰度
+  // 镜像 + 轻微降饱和（保留真实颜色，只压一点饱和和亮度让它融入暗色背景，
+  // 粉色骨骼线依然够醒目。原来是 grayscale(1) 全灰度，看着像监控）
   camctx.translate(w, 0);
   camctx.scale(-1, 1);
-  camctx.filter = 'grayscale(1) contrast(1.06) brightness(.92)';
+  camctx.filter = 'saturate(.88) contrast(1.05) brightness(.96)';
   try { camctx.drawImage(video, 0, 0, w, h); } catch (e) {}
   camctx.filter = 'none';
   camctx.restore();
